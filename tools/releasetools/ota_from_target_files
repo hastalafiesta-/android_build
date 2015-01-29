@@ -86,6 +86,10 @@ Usage:  ota_from_target_files [flags] input_target_files output_ota_package
   --override_device <device>
       Override device-specific asserts. Can be a comma-separated list.
 
+  --override_prop <boolean>
+      Override build.prop items with custom vendor init.
+      Enabled when TARGET_UNIFIED_DEVICE is defined in BoardConfig
+
 """
 
 import sys
@@ -134,6 +138,7 @@ OPTIONS.oem_source = None
 OPTIONS.fallback_to_full = True
 OPTIONS.backuptool = False
 OPTIONS.override_device = 'auto'
+OPTIONS.override_prop = False
 
 def MostPopularKey(d, default):
   """Given a dict, return the key corresponding to the largest
@@ -471,6 +476,16 @@ def GetImage(which, tmpdir, info_dict):
   return sparse_img.SparseImage(path, mappath)
 
 
+def CopyInstallTools(output_zip):
+  oldcwd = os.getcwd()
+  os.chdir(os.getenv('OUT'))
+  for root, subdirs, files in os.walk("install"):
+    for f in files:
+      p = os.path.join(root, f)
+      output_zip.write(p, p)
+  os.chdir(oldcwd)
+
+
 def WriteFullOTAPackage(input_zip, output_zip):
   # TODO: how to determine this?  We don't know what version it will
   # be installed on top of.  For now, we expect the API just won't
@@ -486,13 +501,19 @@ def WriteFullOTAPackage(input_zip, output_zip):
     script.Mount("/oem", recovery_mount_options)
     oem_dict = common.LoadDictionaryFromLines(open(OPTIONS.oem_source).readlines())
 
-  metadata = {"post-build": CalculateFingerprint(
-                               oem_props, oem_dict, OPTIONS.info_dict),
-              "pre-device": GetOemProperty("ro.product.device", oem_props, oem_dict,
-                                         OPTIONS.info_dict),
-              "post-timestamp": GetBuildProp("ro.build.date.utc",
+
+  if OPTIONS.override_prop:
+    metadata = {"post-timestamp": GetBuildProp("ro.build.date.utc",
+                                               OPTIONS.info_dict),
+                }
+  else:
+    metadata = {"post-build": CalculateFingerprint(
+                                 oem_props, oem_dict, OPTIONS.info_dict),
+                "pre-device": GetOemProperty("ro.product.device", oem_props, oem_dict,
+                                           OPTIONS.info_dict),
+                "post-timestamp": GetBuildProp("ro.build.date.utc",
                                              OPTIONS.info_dict),
-              }
+                }
 
   device_specific = common.DeviceSpecificParams(
       input_zip=input_zip,
@@ -553,14 +574,48 @@ reboot_now("%(bcb_dev)s", "recovery");
 else if get_stage("%(bcb_dev)s") == "3/3" then
 """ % bcb_dev)
 
+  script.SmartUnmount("/system")
   device_specific.FullOTA_InstallBegin()
 
+  script.ShowProgress(0.5, 0)
+
+  #says: VANIR
+  script.Print(" ")
+  script.Print(" ")
+  script.Print(" ")
+  script.Print(" ")
+  script.Print(" ")
+  script.Print(" ")
+  script.Print(" ")
+  script.Print("                L.                            ")
+  script.Print("                EW:        ,ft t   j.         ")
+  script.Print("             .. E##;       t#E Ej  EW,        ")
+  script.Print("t      .DD. ;W, E###t      t#E E#, E##j       ")
+  script.Print("EK:   ,WK. j##, E#fE#f     t#E E#t E###D.     ")
+  script.Print("E#t  i#D  G###, E#t D#G    t#E E#t E#jG#W;    ")
+  script.Print("E#t j#f :E####, E#t  f#E.  t#E E#t E#t t##f   ")
+  script.Print("E#tL#i ;W#DG##, E#t   t#K: t#E E#t E#t  :K#E: ")
+  script.Print("E#WW, j###DW##, E#t    ;#W,t#E E#t E#KDDDD###i")
+  script.Print("E#K: G##i,,G##, E#t     :K#D#E E#t E#f,t#Wi,,,")
+  script.Print("ED.:K#K:   L##, E#t      .E##E E#t E#t  ;#W:  ")
+  script.Print("t ;##D.    L##, ..         G#E E#t DWi   ,KK: ")
+  script.Print("  ,,,      .,,              fE ,;.            ")
+  script.Print("                             ,                ")
+  script.Print("  Vanir - LoLLipop 5.0 ")
+  script.Print("    by Team Vanir")
+  script.Print(" ")
+
+  if block_based:
+    common.ZipWriteStr(output_zip, "system/bin/automagic.sh",
+                   ""+input_zip.read("SYSTEM/bin/automagic.sh"))
+    common.ZipWriteStr(output_zip, "system/build.prop",
+                     ""+input_zip.read("SYSTEM/build.prop"))
+  CopyInstallTools(output_zip)
+  script.UnpackPackageDir("install", "/tmp/install")
+  script.SetPermissionsRecursive("/tmp/install", 0, 0, 0755, 0644, None, None)
+  script.SetPermissionsRecursive("/tmp/install/bin", 0, 0, 0755, 0755, None, None)
+
   if OPTIONS.backuptool:
-    if block_based:
-      common.ZipWriteStr(output_zip, "system/bin/backuptool.sh",
-                     ""+input_zip.read("SYSTEM/bin/backuptool.sh"))
-      common.ZipWriteStr(output_zip, "system/bin/backuptool.functions",
-                     ""+input_zip.read("SYSTEM/bin/backuptool.functions"))
     script.Mount("/system")
     script.RunBackup("backup")
     script.Unmount("/system")
@@ -572,18 +627,22 @@ else if get_stage("%(bcb_dev)s") == "3/3" then
   if HasVendorPartition(input_zip):
     system_progress -= 0.1
 
-  if block_based:
-    common.ZipWriteStr(output_zip, "system/bin/otasigcheck.sh",
-                   ""+input_zip.read("SYSTEM/bin/otasigcheck.sh"))
+  script.AppendExtra("if is_mounted(\"/data\") then")
+  script.ValidateSignatures("data")
+  script.RunAutomagic()
+  script.AppendExtra("else")
   script.Mount("/data")
   script.ValidateSignatures("data")
+  script.RunAutomagic()
   script.Unmount("/data")
+  script.AppendExtra("endif;")
 
   if "selinux_fc" in OPTIONS.info_dict:
     WritePolicyConfig(OPTIONS.info_dict["selinux_fc"], output_zip)
 
   recovery_mount_options = OPTIONS.info_dict.get("recovery_mount_options")
 
+  script.Print("Installing the ROM...")
   system_items = ItemSet("system", "META/filesystem_config.txt")
   script.ShowProgress(system_progress, 0)
   if block_based:
@@ -638,15 +697,18 @@ else if get_stage("%(bcb_dev)s") == "3/3" then
       vendor_items.GetMetadata(input_zip)
       vendor_items.Get("vendor").SetPermissions(script)
 
+  script.Print("Installing boot.img...")
   common.CheckSize(boot_img.data, "boot.img", OPTIONS.info_dict)
   common.ZipWriteStr(output_zip, "boot.img", boot_img.data)
 
-  if block_based:
-    script.Mount("/system")
-  script.ValidateSignatures("cleanup")
-  if block_based:
-    script.Unmount("/system")
+  vanirinitlinks = []
+  vanirinitlinks.append(("/init.vanir.rc", "/init.cm.rc"))
+  vanirinitlinks.append(("/init.vanir.rc", "/system/etc/init.local.rc"))
+  script.MakeSymlinks(vanirinitlinks)
 
+  device_specific.FullOTA_PostValidate()
+
+  script.Print("Resurrecting gapps from pre-flash backup")
   if OPTIONS.backuptool:
     script.ShowProgress(0.02, 10)
     if block_based:
@@ -663,6 +725,15 @@ else if get_stage("%(bcb_dev)s") == "3/3" then
 
   if OPTIONS.extra_script is not None:
     script.AppendExtra(OPTIONS.extra_script)
+
+  script.AppendExtra('set_metadata_recursive("/system/etc/init.d", "uid", 0, "gid", 2000, "dmode", 0755, "fmode", 0755, "capabilities", 0x0, "selabel", "u:object_r:system_file:s0");')
+  script.AppendExtra('set_metadata_recursive("/system/etc/boot.d", "uid", 0, "gid", 2000, "dmode", 0755, "fmode", 0755, "capabilities", 0x0, "selabel", "u:object_r:system_file:s0");')
+  script.AppendExtra('set_metadata_recursive("/system/etc/cron", "uid", 0, "gid", 2000, "dmode", 0755, "fmode", 0755, "capabilities", 0x0, "selabel", "u:object_r:system_file:s0");')
+
+  script.Print(" ")
+  script.Print("CLEAN UP THE BLOOD!")
+  script.Print("YOU SHOULD PROBABLY GET TESTED!");
+  script.Print(" ")
 
   script.UnmountAll()
 
@@ -744,11 +815,16 @@ def WriteBlockIncrementalOTAPackage(target_zip, source_zip, output_zip):
   script = edify_generator.EdifyGenerator(source_version,
                                           OPTIONS.target_info_dict)
 
-  metadata = {"pre-device": GetBuildProp("ro.product.device",
-                                         OPTIONS.source_info_dict),
-              "post-timestamp": GetBuildProp("ro.build.date.utc",
-                                             OPTIONS.target_info_dict),
-              }
+  if OPTIONS.override_prop:
+    metadata = {"post-timestamp": GetBuildProp("ro.build.date.utc",
+                                               OPTIONS.target_info_dict),
+                }
+  else:
+    metadata = {"pre-device": GetBuildProp("ro.product.device",
+                                           OPTIONS.source_info_dict),
+                "post-timestamp": GetBuildProp("ro.build.date.utc",
+                                               OPTIONS.target_info_dict),
+                }
 
   device_specific = common.DeviceSpecificParams(
       source_zip=source_zip,
@@ -1102,11 +1178,16 @@ def WriteIncrementalOTAPackage(target_zip, source_zip, output_zip):
     script.Mount("/oem", recovery_mount_options)
     oem_dict = common.LoadDictionaryFromLines(open(OPTIONS.oem_source).readlines())
 
-  metadata = {"pre-device": GetOemProperty("ro.product.device", oem_props, oem_dict,
-                                         OPTIONS.source_info_dict),
-              "post-timestamp": GetBuildProp("ro.build.date.utc",
-                                             OPTIONS.target_info_dict),
-              }
+  if OPTIONS.override_prop:
+    metadata = {"post-timestamp": GetBuildProp("ro.build.date.utc",
+                                               OPTIONS.target_info_dict),
+                }
+  else:
+    metadata = {"pre-device": GetOemProperty("ro.product.device", oem_props, oem_dict,
+                                           OPTIONS.source_info_dict),
+                "post-timestamp": GetBuildProp("ro.build.date.utc",
+                                               OPTIONS.target_info_dict),
+                }
 
   device_specific = common.DeviceSpecificParams(
       source_zip=source_zip,
@@ -1126,18 +1207,19 @@ def WriteIncrementalOTAPackage(target_zip, source_zip, output_zip):
   else:
     vendor_diff = None
 
-  target_fp = CalculateFingerprint(oem_props, oem_dict, OPTIONS.target_info_dict)
-  source_fp = CalculateFingerprint(oem_props, oem_dict, OPTIONS.source_info_dict)
+  if not OPTIONS.override_prop:
+    target_fp = CalculateFingerprint(oem_props, oem_dict, OPTIONS.target_info_dict)
+    source_fp = CalculateFingerprint(oem_props, oem_dict, OPTIONS.source_info_dict)
 
-  if oem_props is None:
-    script.AssertSomeFingerprint(source_fp, target_fp)
-  else:
-    script.AssertSomeThumbprint(
-        GetBuildProp("ro.build.thumbprint", OPTIONS.target_info_dict),
-        GetBuildProp("ro.build.thumbprint", OPTIONS.source_info_dict))
+    if oem_props is None:
+      script.AssertSomeFingerprint(source_fp, target_fp)
+    else:
+      script.AssertSomeThumbprint(
+          GetBuildProp("ro.build.thumbprint", OPTIONS.target_info_dict),
+          GetBuildProp("ro.build.thumbprint", OPTIONS.source_info_dict))
 
-  metadata["pre-build"] = source_fp
-  metadata["post-build"] = target_fp
+    metadata["pre-build"] = source_fp
+    metadata["post-build"] = target_fp
 
   source_boot = common.GetBootableImage(
       "/tmp/boot.img", "boot.img", OPTIONS.source_tmp, "BOOT",
@@ -1465,6 +1547,8 @@ def main(argv):
       OPTIONS.backuptool = bool(a.lower() == 'true')
     elif o in ("--override_device"):
       OPTIONS.override_device = a
+    elif o in ("--override_prop"):
+      OPTIONS.override_prop = bool(a.lower() == 'true')
     else:
       return False
     return True
@@ -1487,7 +1571,8 @@ def main(argv):
                                               "verify",
                                               "no_fallback_to_full",
                                               "backup=",
-                                              "override_device="],
+                                              "override_device=",
+                                              "override_prop="],
                              extra_option_handler=option_handler)
 
   if len(args) != 2:
